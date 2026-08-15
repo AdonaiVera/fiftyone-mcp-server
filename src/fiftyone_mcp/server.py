@@ -13,6 +13,7 @@ import json
 import logging
 from pathlib import Path
 
+from mcp import types
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
@@ -85,6 +86,54 @@ def load_config():
         return {}
 
 
+def _build_server(server_name, registry):
+    """Constructs and wires up the MCP ``Server`` instance.
+
+    ``mcp`` 2.0 replaced the pre-2.0 decorator-based handler
+    registration (``@server.list_tools()`` / ``@server.call_tool()``)
+    with constructor callbacks (``on_list_tools`` / ``on_call_tool``)
+    that must return typed ``mcp.types`` result objects. Both are
+    supported here, selected via a capability check, since
+    ``pyproject.toml`` allows both major lines.
+
+    Args:
+        server_name: the server's display name
+        registry: a :class:`~fiftyone_mcp.registry.ToolRegistry`
+            instance
+
+    Returns:
+        a configured :class:`mcp.server.Server` instance
+    """
+    if hasattr(Server, "list_tools"):
+        server = Server(server_name)
+
+        @server.list_tools()
+        async def _list_tools_handler():
+            return registry.list_tools()
+
+        @server.call_tool()
+        async def _call_tool_handler(name, arguments):
+            result = await registry.call_tool(name, arguments, ctx=None)
+            return result.content
+
+        return server
+
+    async def _on_list_tools(ctx, params):
+        return types.ListToolsResult(tools=registry.list_tools())
+
+    async def _on_call_tool(ctx, params):
+        result = await registry.call_tool(
+            params.name, params.arguments, ctx=None
+        )
+        return types.CallToolResult(content=result.content)
+
+    return Server(  # pylint: disable=unexpected-keyword-arg
+        server_name,
+        on_list_tools=_on_list_tools,
+        on_call_tool=_on_call_tool,
+    )
+
+
 async def main():
     """Main server function."""
     config = load_config()
@@ -93,17 +142,8 @@ async def main():
 
     logger.info("Starting %s server...", server_name)
 
-    server = Server(server_name)
     registry = build_registry(config=config)
-
-    @server.list_tools()
-    async def list_tools_handler():
-        return registry.list_tools()
-
-    @server.call_tool()
-    async def call_tool_handler(name, arguments):
-        result = await registry.call_tool(name, arguments, ctx=None)
-        return result.content
+    server = _build_server(server_name, registry)
 
     logger.info("%s server initialized successfully", server_name)
 
