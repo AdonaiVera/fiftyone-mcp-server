@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install dependencies
+        run: poetry install
+
+      - name: Run tests
+        run: poetry run pytest
+
+  fresh-install-smoke:
+    # Installs the built wheel without poetry.lock, which pins an old
+    # mcp and would hide a resolver regression the "test" job above
+    # can't see. 0.9.1 and 2.0.0 are the oldest and newest supported
+    # mcp major lines (see the mcp bound in pyproject.toml).
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - mcp-version: "0.9.1"
+            label: "pre-2.0 (decorator API)"
+          - mcp-version: "2.0.0"
+            label: "2.0+ (constructor-callback API)"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Build distribution
+        run: poetry build
+
+      - name: Install the built wheel fresh (no lock file involved)
+        run: |
+          python -m venv /tmp/smoke-venv
+          /tmp/smoke-venv/bin/pip install dist/*.whl
+          /tmp/smoke-venv/bin/pip install "mcp==${{ matrix.mcp-version }}"
+
+      - name: Construct the server against mcp ${{ matrix.mcp-version }} (${{ matrix.label }})
+        run: |
+          /tmp/smoke-venv/bin/python -c "
+          from fiftyone_mcp.server import build_registry, _build_server
+
+          registry = build_registry()
+          server = _build_server('fiftyone-mcp', registry)
+          server.create_initialization_options()
+          print('OK: server constructed against mcp ${{ matrix.mcp-version }}')
+          "
